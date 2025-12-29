@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-whisper_math_finetune_optimized.py
+whisper_fine_lora.py
+Use whisper_fine_final.py
 Optimized fine-tuning of Whisper for math formula transcription.
 Includes validation, early stopping, and best practices for maximum performance.
 """
