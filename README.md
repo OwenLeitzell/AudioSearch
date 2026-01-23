@@ -50,12 +50,12 @@ math-speech-direct/
 
 ## Models
 
-| Model | Type | Base Model | Task |
-|-------|------|------------|------|
-| Whisper | ASR | openai/whisper-medium | Audio → LaTeX |
-| Qwen | ASR | nvidia/canary-qwen-2.5b | Audio → Text |
-| Parakeet | ASR | nvidia/parakeet-ctc-1.1b | Audio → Text |
-| Granite | ASR | ibm-granite/granite-speech-3.3-8b | Audio → Text |
+| Model | Type | Base Model |
+|-------|------|------------|
+| Whisper | ASR | openai/whisper-medium |
+| Qwen | ASR | nvidia/canary-qwen-2.5b |
+| Parakeet | ASR | nvidia/parakeet-ctc-1.1b |
+| Granite | ASR | ibm-granite/granite-speech-3.3-8b |
 
 ## Usage
 
