@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+#
+# Run evaluation scripts for ASR models
+#
+# Usage:
+#   ./bin/evaluate whisper    # Run whisper evaluation
+#   ./bin/evaluate qwen       # Run qwen evaluation
+#   ./bin/evaluate parakeet   # Run parakeet evaluation
+#   ./bin/evaluate all        # Run all evaluations
+#
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+EVAL_DIR="$ROOT_DIR/evaluation"
+
+run_whisper() {
+    echo "Running Whisper evaluation..."
+    python "$EVAL_DIR/whisper_evaluate.py"
+}
+
+run_qwen() {
+    echo "Running Qwen evaluation..."
+    python "$EVAL_DIR/qwen_evaluate.py"
+}
+
+run_parakeet() {
+    echo "Running Parakeet evaluation..."
+    python "$EVAL_DIR/parakeet_evaluate.py"
+}
+
+run_granite() {
+    echo "Running Granite evaluation..."
+    python "$EVAL_DIR/granite_evaluate.py"
+}
+
+run_all() {
+    echo "Running all evaluations..."
+    echo ""
+    run_whisper
+    echo ""
+    run_qwen
+    echo ""
+    run_parakeet
+    echo ""
+    run_granite
+}
+
+case "${1:-}" in
+    whisper)
+        run_whisper
+        ;;
+    qwen)
+        run_qwen
+        ;;
+    parakeet)
+        run_parakeet
+        ;;
+    granite)
+        run_granite
+        ;;
+    all)
+        run_all
+        ;;
+    *)
+        echo "Usage: $0 {whisper|qwen|parakeet|granite|all}"
+        echo ""
+        echo "Available models:"
+        echo "  whisper   - OpenAI Whisper large-v3"
+        echo "  qwen      - NVIDIA Canary Qwen 2.5B"
+        echo "  parakeet  - NVIDIA Parakeet CTC 1.1B"
+        echo "  granite   - IBM Granite Speech 3.3 8B"
+        echo "  all       - Run all evaluations"
+        exit 1
+        ;;
+esac

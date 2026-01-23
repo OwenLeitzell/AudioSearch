@@ -1,14 +1,14 @@
 """
-parakeet_evaluate.py
-Basic evaluation of NVIDIA's Parakeet ASR model on the MathBridge dataset.
+granite_evaluate.py
+Evaluation of IBM Granite Speech model on the MathBridge dataset.
 """
 
 import os
 import torch
 import evaluate
-import nemo.collections.asr as nemo_asr
 from tqdm import tqdm
 from datasets import load_dataset, Audio
+from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
 import traceback
 import logging
 
@@ -19,13 +19,13 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # CONFIG
 # ============================================================
-MODEL_NAME = "nvidia/parakeet-ctc-1.1b"  # Options: parakeet-ctc-1.1b, parakeet-rnnt-1.1b, parakeet-tdt-1.1b
+MODEL_NAME = "ibm-granite/granite-speech-3.3-8b"
 HF_DATASET_PATH = "abby1492/mathbridge-audio"
-OUTPUT_DIR = "./eval_results"
+OUTPUT_DIR = "../results"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# Load evaluation metrics
+# Evaluation metrics
 try:
     bleu = evaluate.load("bleu")
     sacrebleu = evaluate.load("sacrebleu")
@@ -60,52 +60,70 @@ def compute_metrics(preds, refs):
         return None
 
 # ============================================================
-# MODEL LOADING - PARAKEET
+# MODEL LOADING - GRANITE
 # ============================================================
-def load_parakeet_model():
-    """Load NVIDIA Parakeet model with error handling."""
-    logger.info(f"Loading Parakeet model: {MODEL_NAME}")
+def load_granite_model():
+    """Load IBM Granite Speech model with error handling."""
+    logger.info(f"Loading Granite Speech model: {MODEL_NAME}")
     
     try:
         logger.info(f"  Downloading/loading {MODEL_NAME}...")
         logger.info(f"  This may take a while on first run...")
         
-        model = nemo_asr.models.ASRModel.from_pretrained(MODEL_NAME)
+        processor = AutoProcessor.from_pretrained(
+            MODEL_NAME,
+            trust_remote_code=True
+        )
         
-        # Move to GPU if available
-        if torch.cuda.is_available():
-            model = model.cuda()
-            logger.info("  Model moved to GPU")
+        model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            MODEL_NAME,
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            device_map="auto",
+            trust_remote_code=True
+        )
         
-        logger.info(f"Successfully loaded Parakeet")
-        return model
+        logger.info(f"Successfully loaded Granite Speech")
+        return model, processor
         
     except Exception as e:
-        logger.error(f"Failed to load Parakeet: {e}")
+        logger.error(f"Failed to load Granite: {e}")
         logger.error(traceback.format_exc())
-        return None
+        return None, None
 
 # ============================================================
-# GENERATION LOGIC - PARAKEET
+# GENERATION LOGIC - GRANITE
 # ============================================================
-def generate_parakeet_output(model, row):
-    """Generate output from Parakeet with error handling."""
+def generate_granite_output(model, processor, row, device):
+    """Generate output from Granite Speech with error handling."""
     try:
-        audio_path = row["audio"]["path"]
-        logger.debug(f"  Processing audio: {audio_path}")
+        # Get audio array
+        audio_array = row["audio"]["array"]
+        sampling_rate = row["audio"]["sampling_rate"]
         
-        # Parakeet uses NeMo's transcribe method
-        transcriptions = model.transcribe([audio_path])
+        # Process audio
+        inputs = processor(
+            audio_array,
+            sampling_rate=sampling_rate,
+            return_tensors="pt"
+        )
         
-        # Handle different return types from NeMo models
-        if isinstance(transcriptions, list):
-            if len(transcriptions) > 0:
-                result = transcriptions[0]
-                # Some models return tuples or lists
-                if isinstance(result, (list, tuple)):
-                    return str(result[0])
-                return str(result)
-        return str(transcriptions)
+        # Move inputs to device
+        inputs = {k: v.to(device) if hasattr(v, 'to') else v for k, v in inputs.items()}
+        
+        # Generate transcription
+        with torch.no_grad():
+            generated_ids = model.generate(
+                **inputs,
+                max_new_tokens=128,
+            )
+        
+        # Decode output
+        transcription = processor.batch_decode(
+            generated_ids, 
+            skip_special_tokens=True
+        )[0]
+        
+        return transcription.strip()
         
     except Exception as e:
         logger.error(f"Error generating output: {e}")
@@ -115,17 +133,20 @@ def generate_parakeet_output(model, row):
 # ============================================================
 # MAIN EVALUATION FUNCTION
 # ============================================================
-def evaluate_parakeet():
-    """Evaluate Parakeet model with comprehensive error handling."""
+def evaluate_granite():
+    """Evaluate Granite Speech model with comprehensive error handling."""
     logger.info(f"\n{'='*60}")
-    logger.info(f"Starting evaluation for: PARAKEET")
+    logger.info(f"Starting evaluation for: GRANITE SPEECH")
     logger.info(f"{'='*60}")
     
     # Load model
-    model = load_parakeet_model()
-    if model is None:
+    model, processor = load_granite_model()
+    if model is None or processor is None:
         logger.error(f"Cannot proceed - model loading failed")
         return None
+    
+    device = next(model.parameters()).device
+    logger.info(f"Model device: {device}")
     
     # Load dataset
     try:
@@ -143,10 +164,10 @@ def evaluate_parakeet():
 
     logger.info(f"Starting inference on {len(dataset)} samples...")
     
-    for idx, row in enumerate(tqdm(dataset, desc="Parakeet evaluation")):
+    for idx, row in enumerate(tqdm(dataset, desc="Granite evaluation")):
         try:
             ref = row["spoken_english"]
-            pred = generate_parakeet_output(model, row)
+            pred = generate_granite_output(model, processor, row, device)
             
             if pred == "[ERROR]":
                 errors += 1
@@ -170,7 +191,7 @@ def evaluate_parakeet():
     logger.info(f"\nCompleted inference: {len(preds)} successful, {errors} errors")
     
     if len(preds) == 0:
-        logger.error(f"No successful predictions for Parakeet")
+        logger.error(f"No successful predictions for Granite")
         return None
 
     # Compute metrics
@@ -178,14 +199,14 @@ def evaluate_parakeet():
     metrics = compute_metrics(preds, refs)
     
     if metrics is None:
-        logger.error(f"Failed to compute metrics for Parakeet")
+        logger.error(f"Failed to compute metrics for Granite")
         return None
 
     # Save results
-    summary_path = os.path.join(OUTPUT_DIR, "parakeet_summary.txt")
+    summary_path = os.path.join(OUTPUT_DIR, "granite_summary.txt")
     try:
         with open(summary_path, "w", encoding="utf-8") as f:
-            f.write(f"Model: Parakeet ({MODEL_NAME})\n")
+            f.write(f"Model: Granite Speech ({MODEL_NAME})\n")
             f.write(f"Total samples: {len(dataset)}\n")
             f.write(f"Successful predictions: {len(preds)}\n")
             f.write(f"Errors: {errors}\n")
@@ -195,7 +216,7 @@ def evaluate_parakeet():
                 f.write(f"{k}: {v:.4f}\n")
         
         logger.info(f"Saved results to: {summary_path}")
-        logger.info(f"\nFINAL RESULTS FOR PARAKEET:")
+        logger.info(f"\nFINAL RESULTS FOR GRANITE:")
         logger.info("-" * 40)
         for k, v in metrics.items():
             logger.info(f"  {k}: {v:.4f}")
@@ -209,10 +230,10 @@ def evaluate_parakeet():
     return metrics
 
 # ============================================================
-# RUN PARAKEET EVALUATION
+# RUN GRANITE EVALUATION
 # ============================================================
 if __name__ == "__main__":
-    logger.info("Starting Parakeet model evaluation")
+    logger.info("Starting Granite Speech model evaluation")
     logger.info(f"Model: {MODEL_NAME}")
     logger.info(f"Output directory: {OUTPUT_DIR}")
     logger.info(f"GPU available: {torch.cuda.is_available()}")
@@ -221,7 +242,7 @@ if __name__ == "__main__":
         logger.info(f"GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
     
     try:
-        metrics = evaluate_parakeet()
+        metrics = evaluate_granite()
         if metrics:
             logger.info("\nEVALUATION COMPLETED SUCCESSFULLY")
         else:

@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+#
+# Run fine-tuning scripts for ASR models
+#
+# Usage:
+#   ./bin/finetune whisper    # Fine-tune whisper
+#   ./bin/finetune qwen       # Fine-tune qwen
+#   ./bin/finetune parakeet   # Fine-tune parakeet
+#   ./bin/finetune all        # Fine-tune all models
+#
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+FINETUNE_DIR="$ROOT_DIR/finetuning"
+
+run_whisper() {
+    echo "Fine-tuning Whisper..."
+    python "$FINETUNE_DIR/whisper_finetune.py"
+}
+
+run_qwen() {
+    echo "Fine-tuning Qwen..."
+    python "$FINETUNE_DIR/qwen_finetune.py"
+}
+
+run_parakeet() {
+    echo "Fine-tuning Parakeet..."
+    python "$FINETUNE_DIR/parakeet_finetune.py"
+}
+
+run_granite() {
+    echo "Fine-tuning Granite..."
+    python "$FINETUNE_DIR/granite_finetune.py"
+}
+
+run_all() {
+    echo "Fine-tuning all models..."
+    echo ""
+    run_whisper
+    echo ""
+    run_qwen
+    echo ""
+    run_parakeet
+    echo ""
+    run_granite
+}
+
+case "${1:-}" in
+    whisper)
+        run_whisper
+        ;;
+    qwen)
+        run_qwen
+        ;;
+    parakeet)
+        run_parakeet
+        ;;
+    granite)
+        run_granite
+        ;;
+    all)
+        run_all
+        ;;
+    *)
+        echo "Usage: $0 {whisper|qwen|parakeet|granite|all}"
+        echo ""
+        echo "Available models:"
+        echo "  whisper   - OpenAI Whisper medium"
+        echo "  qwen      - Qwen 2.5 Math 1.5B"
+        echo "  parakeet  - NVIDIA Parakeet CTC 1.1B"
+        echo "  granite   - IBM Granite Speech 3.3 8B"
+        echo "  all       - Fine-tune all models (sequential)"
+        exit 1
+        ;;
+esac

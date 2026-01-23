@@ -1,67 +1,123 @@
-# AudioSearch
-# Math Formula Transcription Models
+# Math Speech Direct
 
-This repository contains model evaluation scripts for transcribing spoken math phrases and forumlas into LaTeX. This repository contains both base models and fine-tuned models for Whisper (OpenAI) and Qwen (Nvidia)
+Transcription models for converting spoken mathematical formulas into LaTeX. Includes evaluation scripts for base models and fine-tuning pipelines for Whisper, Qwen, and Parakeet.
 
-# AudioSearch
+## Quick Start
+
+```bash
+# Install dependencies
+./bin/install              # Basic install
+./bin/install --with-nemo  # Include NeMo for Qwen/Parakeet
+
+# Activate environment
+conda activate math-speech
+
+# Run evaluation
+./bin/evaluate whisper
+
+# Run fine-tuning
+./bin/finetune whisper
+```
 
 ## Project Structure
+
 ```
-AudioSearch/
+math-speech-direct/
+├── bin/
+│   ├── install            # Create conda env and install dependencies
+│   ├── evaluate           # Run evaluation scripts
+│   └── finetune           # Run fine-tuning scripts
 │
-├── base_models/                    (ChatGPT/Cursor assisted)
-│   ├── Qwen_evaluate.py           # First attempt at Qwen evaluation (crude, no tuning)
-│   │                               # Evaluates base Qwen ASR model (nvidia/canary-qwen-2.5b)
-│   │                               # on MathBridge dataset with BLEU, ROUGE, WER, and CER metrics
-│   │
-│   ├── Real_Whisper_evaluate.py   # Improved evaluation script
-│   │                               # Evaluates Whisper-large-v3 on MathBridge dataset
-│   │                               # with before/after context
-│   │
-│   ├── Whisper_evaluate.py        # Base Whisper-large-v3 evaluation
-│   │                               # Metrics: BLEU, SacreBLEU, WER, CER, and ROUGE-L
-│   │
-│   └── evaluate_models.py         # Early multi-model runner
-│                                   # Includes Phi-4 (Microsoft)
+├── evaluation/
+│   ├── whisper_evaluate.py         # Whisper large-v3 evaluation
+│   ├── whisper_context_evaluate.py # Whisper with context combination
+│   ├── qwen_evaluate.py            # NVIDIA Canary Qwen 2.5B evaluation
+│   ├── parakeet_evaluate.py        # NVIDIA Parakeet CTC 1.1B evaluation
+│   └── granite_evaluate.py         # IBM Granite Speech 3.3 8B evaluation
 │
-├── fine_tuned_models/
-│   ├── qwen_fine_final.py         # Fine-tuned Qwen2.5-Math-1.5B for formula transcription
-│   │                               # Compares base vs fine-tuned with detailed Excel output
-│   │
-│   ├── whisper_fine_final.py      # Fine-tuned Whisper-medium for math transcription
-│   │                               # Side-by-side base vs fine-tuned analysis
-│   │                               # Note: Can use Whisper-Large-v3 (line 25) but memory-intensive
-│   │                               # Change: MODEL_NAME = "openai/whisper-large-v3"
-│   │
-│   └── whisper_fine_lora.py       # Early LoRA fine-tuning attempt
-│                                   # Parameter-efficient fine-tuning for math transcription
+├── finetuning/
+│   ├── whisper_finetune.py         # Whisper fine-tuning (medium)
+│   ├── whisper_finetune_lora.py    # Whisper LoRA fine-tuning (large-v3)
+│   ├── qwen_finetune.py            # Qwen 2.5 Math fine-tuning
+│   ├── parakeet_finetune.py        # Parakeet CTC fine-tuning
+│   └── granite_finetune.py         # Granite Speech fine-tuning
 │
-└── results/
-    ├── math-qwen_speed_times.json # Qwen model timing benchmarks
-    └── whisper_math_outputs.xlsx  # Whisper evaluation results
-                                    # Includes: predictions, hallucinations, WER, CER, improvements
+├── models/                # Fine-tuned model outputs (git-ignored)
+├── results/               # Evaluation results (git-ignored)
+├── requirements.txt
+└── README.md
 ```
 
-## Quick Reference
+## Models
 
-### Base Models
-Scripts for evaluating pre-trained models without fine-tuning.
+| Model | Type | Base Model | Task |
+|-------|------|------------|------|
+| Whisper | ASR | openai/whisper-medium | Audio → LaTeX |
+| Qwen | ASR | nvidia/canary-qwen-2.5b | Audio → Text |
+| Parakeet | ASR | nvidia/parakeet-ctc-1.1b | Audio → Text |
+| Granite | ASR | ibm-granite/granite-speech-3.3-8b | Audio → Text |
 
-### Fine-Tuned Models
-Scripts for training and evaluating customized models for mathematical formula transcription.
+## Usage
 
-### Results
-Performance metrics and benchmark data from model evaluations.'''
+### Evaluation
 
-## Overview
-This project aims to create working fine-tuned models to transcribe spoken mathematical formulas into LaTeX. The base Whisper model aims to convert the recorded audio into text output, the fine-tuned model goes directly from audio to LaTeX. The fine-tuning trains Whisper to transcriber spoken math directly into LaTeX, skipping an additional transcription step into English text first. The Qwen base model does not process audio directly but instead builds a prompt from the spoken math columns in the dataset. Qwen then generates a LaTeX formula from the text prompt. The base model goes from audio to text (spoken english) and the fine-tuned model processing text into LaTeX.
+Evaluate pre-trained models on the MathBridge dataset:
+
+```bash
+./bin/evaluate whisper    # Run Whisper evaluation
+./bin/evaluate qwen       # Run Qwen evaluation
+./bin/evaluate parakeet   # Run Parakeet evaluation
+./bin/evaluate all        # Run all evaluations
+```
+
+Results are saved to `results/` with metrics including BLEU, SacreBLEU, ROUGE-L, WER, and CER.
+
+### Fine-tuning
+
+Fine-tune models for math formula transcription:
+
+```bash
+./bin/finetune whisper    # Fine-tune Whisper
+./bin/finetune qwen       # Fine-tune Qwen
+./bin/finetune parakeet   # Fine-tune Parakeet
+./bin/finetune all        # Fine-tune all models
+```
+
+Fine-tuned models are saved to `models/`. Each script compares base vs fine-tuned performance and outputs detailed results to `results/`.
 
 ## Dataset
-For this project and all training and testing I used 'abby1492/mathbridge-audio'. This contains 1000 audio recording of mathematical formulas and includes context before and context after, as well as ground truth LaTeX equations. The sampels are taken from Kyudan/MathBridge.
-I am constructing my own dataset mirrored after abby1492 dataset with context_before, context_after, ground truth equations, and spoken_english. The goal is that this dataset can be interchanged with the abby1492 dataset in the models without adapting the models. I am collecting new recording from MathBridge without overlapping with abby1492 samples.
 
+Training and evaluation uses the [abby1492/mathbridge-audio](https://huggingface.co/datasets/abby1492/mathbridge-audio) dataset, which contains 1000 audio recordings of mathematical formulas with:
 
+- `audio` - Audio recording of spoken formula
+- `spoken_english` - Transcription of spoken math
+- `equation` - Ground truth LaTeX
+- `context_before` / `context_after` - Surrounding context
 
+## Requirements
 
+- Python 3.10+
+- CUDA-capable GPU (recommended)
+- conda (for environment management)
 
+### Dependencies
 
+Core dependencies are installed via `./bin/install`:
+
+- PyTorch with CUDA support
+- Transformers, Datasets, Accelerate
+- NeMo toolkit (optional, for Qwen/Parakeet)
+- Evaluation metrics (BLEU, ROUGE, WER, CER)
+
+See `requirements.txt` for full list.
+
+## Overview
+
+This project explores different approaches to transcribing spoken math:
+
+- **Whisper**: Fine-tuned to go directly from audio to LaTeX, skipping the intermediate English transcription step
+- **Qwen**: NVIDIA's Canary Qwen ASR model fine-tuned for math speech recognition
+- **Parakeet**: NVIDIA's Parakeet ASR model fine-tuned for math speech recognition
+- **Granite**: IBM's speech-language model with strong ASR capabilities
+
+The fine-tuning process adds special tokens for LaTeX symbols (Greek letters, math operators, etc.) and trains on the MathBridge dataset to improve math-specific transcription accuracy.

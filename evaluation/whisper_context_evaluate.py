@@ -14,7 +14,7 @@ AUDIO_COLUMN = "audio"
 SPLIT = "train"
 LANGUAGE = "en"
 MAX_SAMPLES = None
-OUTPUT_FILE = "whisper_v3_context_eval.txt"
+OUTPUT_FILE = "../results/whisper_v3_context_eval.txt"
 
 # -----------------------
 # LOAD MODEL & PROCESSOR

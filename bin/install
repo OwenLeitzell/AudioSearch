@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+#
+# Create conda environment and install dependencies
+#
+# Usage:
+#   ./bin/install              # Basic install (no NeMo)
+#   ./bin/install --with-nemo  # Include NeMo for Qwen/Parakeet
+#
+
+set -e
+
+ENV_NAME="math-speech"
+PYTHON_VERSION="3.10"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+info() { echo -e "${GREEN}[INFO]${NC} $1"; }
+warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+
+# Check for conda
+if ! command -v conda &> /dev/null; then
+    error "conda not found. Please install Miniconda or Anaconda first:
+    https://docs.conda.io/en/latest/miniconda.html"
+fi
+
+# Parse arguments
+WITH_NEMO=false
+for arg in "$@"; do
+    case $arg in
+        --with-nemo)
+            WITH_NEMO=true
+            shift
+            ;;
+    esac
+done
+
+# Activate environment (create if doesn't exist)
+eval "$(conda shell.bash hook)"
+
+if conda env list | grep -q "^$ENV_NAME "; then
+    info "Environment '$ENV_NAME' already exists, skipping creation..."
+else
+    info "Creating conda environment: $ENV_NAME (Python $PYTHON_VERSION)"
+    conda create -n "$ENV_NAME" python="$PYTHON_VERSION" -y
+fi
+
+info "Activating environment..."
+conda activate "$ENV_NAME"
+
+# Install PyTorch (with CUDA on Linux, CPU-only on macOS)
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    info "Installing PyTorch (macOS - CPU only)..."
+    conda install pytorch torchaudio -c pytorch -y
+else
+    info "Installing PyTorch with CUDA support..."
+    conda install pytorch torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia -y
+fi
+
+# Install remaining dependencies via pip
+info "Installing Python dependencies..."
+pip install --upgrade pip
+pip install -r "$ROOT_DIR/requirements.txt"
+
+# Install additional evaluation metrics
+info "Installing evaluation metrics..."
+pip install sacrebleu rouge_score jiwer
+
+# Optional: Install NeMo
+if [ "$WITH_NEMO" = true ]; then
+    info "Installing NVIDIA NeMo (this may take a while)..."
+    pip install Cython
+    pip install nemo_toolkit[asr]
+else
+    warn "Skipping NeMo installation. Run with --with-nemo to include it."
+    warn "NeMo is required for Qwen and Parakeet models."
+fi
+
+# Create output directories
+info "Creating output directories..."
+mkdir -p "$ROOT_DIR/models"
+mkdir -p "$ROOT_DIR/results"
+
+# Summary
+echo ""
+info "Installation complete!"
+echo ""
+echo "To activate the environment:"
+echo "  conda activate $ENV_NAME"
+echo ""
+echo "To run evaluations:"
+echo "  ./bin/evaluate whisper"
+echo ""
+echo "To run fine-tuning:"
+echo "  ./bin/finetune whisper"
+echo ""
+
+if [ "$WITH_NEMO" = false ]; then
+    echo "Note: NeMo was not installed. To use Qwen/Parakeet models, run:"
+    echo "  conda activate $ENV_NAME && pip install nemo_toolkit[asr]"
+    echo ""
+fi

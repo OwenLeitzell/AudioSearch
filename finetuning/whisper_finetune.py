@@ -27,8 +27,8 @@ DATASET_NAME = "abby1492/mathbridge-audio"
 AUDIO_COLUMN = "audio"
 SPLIT = "train"
 MAX_SAMPLES = None  
-OUTPUT_XLSX = "whisper_math_outputs2.xlsx"
-OUTPUT_MODEL_DIR = "./whisper_math_best"
+OUTPUT_XLSX = "../results/whisper_math_outputs2.xlsx"
+OUTPUT_MODEL_DIR = "../models/whisper_math_best"
 
 
 # Optimized training hyperparameters

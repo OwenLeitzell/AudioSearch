@@ -1,8 +1,7 @@
 """
-parakeet_fine_final.py
-Fine-tuning of NVIDIA's Parakeet CTC model for math formula transcription.
-Includes validation, early stopping, and best practices for maximum performance.
-Similar structure to whisper_fine_final.py, but adapted for NeMo's ASR training framework.
+qwen_finetune.py
+Fine-tuning of NVIDIA Canary Qwen ASR model for math formula transcription.
+Uses NeMo framework for training.
 """
 
 import os
@@ -10,11 +9,8 @@ import re
 import torch
 import pandas as pd
 import numpy as np
-from omegaconf import OmegaConf
 from datasets import load_dataset, Audio
 import nemo.collections.asr as nemo_asr
-from nemo.collections.asr.models import EncDecCTCModelBPE
-from nemo.utils import logging
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from evaluate import load
@@ -22,39 +18,35 @@ import json
 import tempfile
 import soundfile as sf
 
-# Disable wandb for account log in and verification
 os.environ["WANDB_DISABLED"] = "true"
 
 # -------------------- CONFIG -------------------- #
-MODEL_NAME = "nvidia/parakeet-ctc-1.1b"  # Options: parakeet-ctc-1.1b, parakeet-ctc-0.6b
+MODEL_NAME = "nvidia/canary-qwen-2.5b"
 DATASET_NAME = "abby1492/mathbridge-audio"
 AUDIO_COLUMN = "audio"
 SPLIT = "train"
 MAX_SAMPLES = None
-OUTPUT_XLSX = "parakeet_math_outputs.xlsx"
-OUTPUT_MODEL_DIR = "./parakeet_math_best"
+OUTPUT_XLSX = "../results/qwen_math_outputs.xlsx"
+OUTPUT_MODEL_DIR = "../models/qwen_math_best"
 
 # Training hyperparameters
-# Parakeet uses audio features similar to Whisper, so similar batch size constraints
-PER_DEVICE_BATCH = 16  # 16 samples per batch per GPU (for 50-100GB VRAM)
-GRAD_ACCUM = 2  # Effective batch size = 2 * 16 = 32
-NUM_EPOCHS = 20  # More epochs for better learning
-LR = 1e-5  # Conservative learning rate for fine-tuning
-WARMUP_RATIO = 0.1  # Warm up for 10% of training
+PER_DEVICE_BATCH = 8
+GRAD_ACCUM = 4  # Effective batch size = 8 * 4 = 32
+NUM_EPOCHS = 20
+LR = 1e-5
+WARMUP_RATIO = 0.1
 WEIGHT_DECAY = 0.005
 MAX_GRAD_NORM = 1.0
 
 # Evaluation settings
 EARLY_STOPPING_PATIENCE = 5
 
-# Device setup
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print("Using device:", device)
 
 # -------------------- LOAD DATASET -------------------- #
 print(f"Loading dataset {DATASET_NAME}, split {SPLIT}")
 dataset = load_dataset(DATASET_NAME, split=SPLIT)
-# 16000 is Parakeet's required sample rate
 dataset = dataset.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
 
 # Split into train and validation (80/20 split)
@@ -82,7 +74,6 @@ def normalize_latex(tex: str) -> str:
     s = re.sub(r"(?<!\\){\s*([A-Za-z0-9_\\]+)\s*}", r"\1", s)
     return s
 
-# Apply normalization to dataset
 train_dataset = train_dataset.map(lambda ex: {"text_norm": normalize_latex(ex.get("equation", ""))})
 eval_dataset = eval_dataset.map(lambda ex: {"text_norm": normalize_latex(ex.get("equation", ""))})
 
@@ -96,17 +87,13 @@ def create_nemo_manifest(dataset_split, manifest_path, temp_audio_dir):
     
     manifest_entries = []
     for idx, example in enumerate(dataset_split):
-        # Save audio to temporary file (NeMo needs file paths)
         audio_array = example[AUDIO_COLUMN]["array"]
         sample_rate = example[AUDIO_COLUMN]["sampling_rate"]
         
         audio_path = os.path.join(temp_audio_dir, f"audio_{idx}.wav")
         sf.write(audio_path, audio_array, sample_rate)
         
-        # Get duration
         duration = len(audio_array) / sample_rate
-        
-        # Get transcription (using spoken_english for ASR task)
         text = example.get("spoken_english", example.get("text_norm", ""))
         
         manifest_entries.append({
@@ -115,15 +102,14 @@ def create_nemo_manifest(dataset_split, manifest_path, temp_audio_dir):
             "duration": duration
         })
     
-    # Write manifest file
     with open(manifest_path, "w") as f:
         for entry in manifest_entries:
             f.write(json.dumps(entry) + "\n")
     
     return manifest_path
 
-# Create temporary directories for audio files and manifests
-TEMP_DIR = tempfile.mkdtemp(prefix="parakeet_finetune_")
+# Create temporary directories
+TEMP_DIR = tempfile.mkdtemp(prefix="qwen_finetune_")
 TRAIN_MANIFEST = os.path.join(TEMP_DIR, "train_manifest.json")
 EVAL_MANIFEST = os.path.join(TEMP_DIR, "eval_manifest.json")
 TRAIN_AUDIO_DIR = os.path.join(TEMP_DIR, "train_audio")
@@ -135,39 +121,34 @@ create_nemo_manifest(eval_dataset, EVAL_MANIFEST, EVAL_AUDIO_DIR)
 print(f"Manifests created at {TEMP_DIR}")
 
 # -------------------- LOAD MODEL -------------------- #
-print(f"Loading Parakeet model: {MODEL_NAME}")
+print(f"Loading Canary Qwen model: {MODEL_NAME}")
 model = nemo_asr.models.ASRModel.from_pretrained(MODEL_NAME)
 
 # Update model config for fine-tuning
-# Configure training data
 model.cfg.train_ds.manifest_filepath = TRAIN_MANIFEST
 model.cfg.train_ds.batch_size = PER_DEVICE_BATCH
 model.cfg.train_ds.num_workers = 4
 model.cfg.train_ds.pin_memory = True
 
-# Configure validation data
 model.cfg.validation_ds.manifest_filepath = EVAL_MANIFEST
 model.cfg.validation_ds.batch_size = PER_DEVICE_BATCH
 model.cfg.validation_ds.num_workers = 4
 
-# Setup the data loaders
+# Setup data loaders
 model.setup_training_data(model.cfg.train_ds)
 model.setup_validation_data(model.cfg.validation_ds)
 
 print(f"Model loaded. Total trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
 # -------------------- TRAINING SETUP -------------------- #
-# Configure optimizer
 model.cfg.optim.lr = LR
 model.cfg.optim.weight_decay = WEIGHT_DECAY
 
-# Create output directory
 os.makedirs(OUTPUT_MODEL_DIR, exist_ok=True)
 
-# Callbacks
 checkpoint_callback = ModelCheckpoint(
     dirpath=OUTPUT_MODEL_DIR,
-    filename="parakeet-{epoch:02d}-{val_wer:.4f}",
+    filename="qwen-{epoch:02d}-{val_wer:.4f}",
     monitor="val_wer",
     mode="min",
     save_top_k=3,
@@ -182,7 +163,6 @@ early_stopping_callback = EarlyStopping(
     min_delta=0.001,
 )
 
-# Configure trainer
 trainer = pl.Trainer(
     devices=1 if torch.cuda.is_available() else "auto",
     accelerator="gpu" if torch.cuda.is_available() else "cpu",
@@ -192,7 +172,7 @@ trainer = pl.Trainer(
     precision=16 if torch.cuda.is_available() else 32,
     callbacks=[checkpoint_callback, early_stopping_callback],
     log_every_n_steps=50,
-    val_check_interval=0.25,  # Validate 4 times per epoch
+    val_check_interval=0.25,
     default_root_dir=OUTPUT_MODEL_DIR,
     enable_progress_bar=True,
 )
@@ -205,11 +185,9 @@ print(f"Learning rate: {LR}")
 print(f"Epochs: {NUM_EPOCHS}")
 print("=" * 50 + "\n")
 
-# Train the model
 trainer.fit(model)
 
-# Save the best model
-model.save_to(os.path.join(OUTPUT_MODEL_DIR, "parakeet_math_finetuned.nemo"))
+model.save_to(os.path.join(OUTPUT_MODEL_DIR, "qwen_math_finetuned.nemo"))
 print(f"\nBest model saved to {OUTPUT_MODEL_DIR}")
 
 # -------------------- FINAL EVALUATION -------------------- #
@@ -217,7 +195,6 @@ print("\n" + "=" * 50)
 print("Running final evaluation on validation set...")
 print("=" * 50 + "\n")
 
-# Load metrics
 wer_metric = load("wer")
 cer_metric = load("cer")
 
@@ -248,7 +225,7 @@ if torch.cuda.is_available():
     base_model = base_model.cuda()
 base_model.eval()
 
-# Reload evaluation data with original fields
+# Reload evaluation data
 eval_data_full = dataset["test"]
 eval_data_full = eval_data_full.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
 eval_data_full = eval_data_full.map(lambda ex: {"text_norm": normalize_latex(ex.get("equation", ""))})
@@ -267,7 +244,6 @@ for i in range(len(eval_data_full)):
     ex_full = eval_data_full[i]
     gt = ex_full.get("spoken_english", ex_full.get("text_norm", ""))
     
-    # Get audio file path from eval manifest
     audio_path = os.path.join(EVAL_AUDIO_DIR, f"audio_{i}.wav")
     
     # Base model prediction
@@ -298,12 +274,10 @@ for i in range(len(eval_data_full)):
         "CER_Improvement": cer_base - cer_ft,
     })
 
-# Save detailed results
 df = pd.DataFrame(rows)
 df.to_excel(OUTPUT_XLSX, index=False)
 print(f"\nDetailed results saved to {OUTPUT_XLSX}")
 
-# Print summary statistics
 print("\n" + "=" * 50)
 print("FINAL RESULTS SUMMARY")
 print("=" * 50)
@@ -319,6 +293,5 @@ print(f"  CER Reduction: {df['CER_Improvement'].mean():.4f} ({df['CER_Improvemen
 print(f"\n% of samples improved: {(df['WER_Improvement'] > 0).sum() / len(df) * 100:.1f}%")
 print("=" * 50 + "\n")
 
-# Cleanup temp directory notice
 print(f"\nNote: Temporary audio files are in {TEMP_DIR}")
 print("You can delete this directory after verification if needed.")

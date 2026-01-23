@@ -11,7 +11,7 @@ from tqdm import tqdm
 from datasets import load_dataset, Audio
 
 HF_DATASET_PATH = "abby1492/mathbridge-audio"
-OUTPUT_DIR = "./eval_results"
+OUTPUT_DIR = "../results"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Load metrics

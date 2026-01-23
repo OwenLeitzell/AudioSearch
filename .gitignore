@@ -1,0 +1,71 @@
+# Model outputs from fine-tuning
+models/
+
+# Evaluation results
+results/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temp files
+tmp/
+temp/
+*.tmp
+
+# NeMo / PyTorch Lightning
+lightning_logs/
+nemo_experiments/
+*.nemo
+
+# Tensorboard
+runs/
+tensorboard/
+
+# Weights & Biases
+wandb/
+
+# HuggingFace cache (optional - uncomment if you want to ignore)
+# ~/.cache/huggingface/
