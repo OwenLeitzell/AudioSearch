@@ -10,6 +10,7 @@ Training requires: encoding audio -> prepending to decoder inputs -> causal LM l
 import os
 import re
 import io
+import math
 import torch
 import torchaudio
 import pandas as pd
@@ -187,6 +188,7 @@ class GraniteSpeechWrapper(torch.nn.Module):
         super().__init__()
         object.__setattr__(self, 'model', model)
         self._modules['model'] = model
+        self._warned_empty_supervision = False
     
     def forward(self, input_features=None, labels=None, attention_mask=None,
                 input_ids=None, inputs_embeds=None, **kwargs):
@@ -196,20 +198,42 @@ class GraniteSpeechWrapper(torch.nn.Module):
         if input_features is not None:
             # Step 1: Encode audio through CTC encoder + Q-Former projector
             encoder_outputs = wrapped_model.encoder(input_features)
-            audio_embeds = wrapped_model.projector(encoder_outputs)
+            if hasattr(encoder_outputs, "last_hidden_state") and encoder_outputs.last_hidden_state is not None:
+                encoder_hidden_states = encoder_outputs.last_hidden_state
+            elif isinstance(encoder_outputs, (tuple, list)) and len(encoder_outputs) > 0:
+                encoder_hidden_states = encoder_outputs[0]
+            else:
+                encoder_hidden_states = encoder_outputs
+            audio_embeds = wrapped_model.projector(encoder_hidden_states)
             # audio_embeds: [batch, N_audio, hidden_size]
+            embed_fn = wrapped_model.language_model.get_input_embeddings()
+            lm_device = embed_fn.weight.device
+            audio_embeds = audio_embeds.to(lm_device)
             
             batch_size = audio_embeds.shape[0]
             audio_len = audio_embeds.shape[1]
             
             if labels is not None:
+                # Keep label IDs in a safe range to avoid CUDA device-side asserts in CE loss.
+                vocab_size = wrapped_model.language_model.get_input_embeddings().num_embeddings
+                labels = labels.clone()
+                # Preserve ignore index, invalidate any other negative IDs.
+                labels[(labels < 0) & (labels != -100)] = -100
+                # IDs outside vocab are mapped to a safe token to preserve supervision.
+                safe_id = getattr(wrapped_model.config, "unk_token_id", None)
+                if safe_id is None:
+                    safe_id = getattr(wrapped_model.config, "eos_token_id", None)
+                if safe_id is None:
+                    safe_id = getattr(wrapped_model.config, "pad_token_id", 0)
+                safe_id = int(min(max(safe_id, 0), vocab_size - 1))
+                labels[labels >= vocab_size] = safe_id
+
                 # Step 2: Create decoder input embeddings from labels
                 # Replace -100 (ignore index) with pad_token_id for embedding lookup
                 decoder_ids = labels.clone()
                 decoder_ids[decoder_ids == -100] = wrapped_model.config.pad_token_id or 0
                 
                 # Clamp to valid vocab range
-                vocab_size = wrapped_model.language_model.get_input_embeddings().num_embeddings
                 decoder_ids = decoder_ids.clamp(0, vocab_size - 1)
                 
                 # Shift right: prepend BOS token, drop last token
@@ -225,8 +249,7 @@ class GraniteSpeechWrapper(torch.nn.Module):
                 shifted_decoder_ids = torch.cat([bos_col, decoder_ids[:, :-1]], dim=1)
                 
                 # Get text embeddings
-                embed_fn = wrapped_model.language_model.get_input_embeddings()
-                decoder_embeds = embed_fn(shifted_decoder_ids.to(audio_embeds.device))
+                decoder_embeds = embed_fn(shifted_decoder_ids.to(lm_device))
                 
                 # Step 3: Concatenate [audio_embeds, decoder_embeds]
                 combined_embeds = torch.cat([audio_embeds, decoder_embeds], dim=1)
@@ -235,22 +258,22 @@ class GraniteSpeechWrapper(torch.nn.Module):
                 # Labels for audio positions are -100 (ignored in loss)
                 audio_labels = torch.full(
                     (batch_size, audio_len), -100,
-                    dtype=labels.dtype, device=labels.device
+                    dtype=labels.dtype, device=lm_device
                 )
-                expanded_labels = torch.cat([audio_labels, labels], dim=1)
+                expanded_labels = torch.cat([audio_labels, labels.to(lm_device)], dim=1)
                 
                 # Step 5: Create attention mask for full sequence
                 total_len = combined_embeds.shape[1]
                 if attention_mask is not None:
                     audio_mask = torch.ones(
                         batch_size, audio_len,
-                        dtype=attention_mask.dtype, device=attention_mask.device
+                        dtype=attention_mask.dtype, device=lm_device
                     )
-                    combined_mask = torch.cat([audio_mask, attention_mask], dim=1)
+                    combined_mask = torch.cat([audio_mask, attention_mask.to(lm_device)], dim=1)
                 else:
                     combined_mask = torch.ones(
                         batch_size, total_len,
-                        dtype=torch.long, device=combined_embeds.device
+                        dtype=torch.long, device=lm_device
                     )
                 
                 # Step 6: Run through language model
@@ -262,12 +285,24 @@ class GraniteSpeechWrapper(torch.nn.Module):
                 
                 # Step 7: Compute causal LM loss (shifted)
                 shift_logits = logits[..., :-1, :].contiguous()
-                shift_labels = expanded_labels[..., 1:].contiguous()
-                shift_mask = combined_mask[..., 1:].contiguous()
+                shift_labels = expanded_labels[..., 1:].to(logits.device).contiguous()
+                shift_mask = combined_mask[..., 1:].to(logits.device).contiguous()
                 
                 # Apply mask to select valid (non-padding) positions
                 valid_logits = shift_logits[shift_mask != 0]
                 valid_labels = shift_labels[shift_mask != 0]
+
+                # Extra safety: ensure labels are valid for cross entropy.
+                valid_labels[(valid_labels < 0) & (valid_labels != -100)] = -100
+                valid_labels[valid_labels >= logits.shape[-1]] = safe_id
+
+                # Avoid NaN when a micro-batch has no valid supervised tokens.
+                if valid_logits.numel() == 0:
+                    if not self._warned_empty_supervision:
+                        print("WARNING: Empty supervised token set in batch; returning zero loss for this batch.")
+                        self._warned_empty_supervision = True
+                    zero_loss = logits.sum() * 0.0
+                    return CausalLMOutputWithPast(loss=zero_loss, logits=logits)
                 
                 loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
                 loss = loss_fct(
@@ -281,7 +316,7 @@ class GraniteSpeechWrapper(torch.nn.Module):
                 # No labels (inference/generation) - just return audio context
                 lm_outputs = wrapped_model.language_model(
                     inputs_embeds=audio_embeds,
-                    attention_mask=attention_mask,
+                    attention_mask=attention_mask.to(lm_device) if attention_mask is not None else None,
                 )
                 return CausalLMOutputWithPast(logits=lm_outputs.logits)
         
@@ -302,15 +337,39 @@ class GraniteSpeechWrapper(torch.nn.Module):
         if input_features is not None:
             # Encode audio
             encoder_outputs = wrapped_model.encoder(input_features)
-            audio_embeds = wrapped_model.projector(encoder_outputs)
+            if hasattr(encoder_outputs, "last_hidden_state") and encoder_outputs.last_hidden_state is not None:
+                encoder_hidden_states = encoder_outputs.last_hidden_state
+            elif isinstance(encoder_outputs, (tuple, list)) and len(encoder_outputs) > 0:
+                encoder_hidden_states = encoder_outputs[0]
+            else:
+                encoder_hidden_states = encoder_outputs
+            audio_embeds = wrapped_model.projector(encoder_hidden_states)
+            lm_device = wrapped_model.language_model.get_input_embeddings().weight.device
+            audio_embeds = audio_embeds.to(lm_device)
             
             # Generate continuation from audio context
             # Remove input_features from kwargs to avoid double processing
             kwargs.pop('input_features', None)
+            # GraniteSpeechConfig may not expose eos_token_id directly.
+            # Resolve special token ids from multiple config locations safely.
+            eos_id = getattr(wrapped_model.config, "eos_token_id", None)
+            if eos_id is None and hasattr(wrapped_model, "language_model"):
+                eos_id = getattr(wrapped_model.language_model.config, "eos_token_id", None)
+            if eos_id is None:
+                eos_id = getattr(wrapped_model.generation_config, "eos_token_id", None)
+
+            pad_id = getattr(wrapped_model.config, "pad_token_id", None)
+            if pad_id is None and hasattr(wrapped_model, "language_model"):
+                pad_id = getattr(wrapped_model.language_model.config, "pad_token_id", None)
+            if pad_id is None:
+                pad_id = getattr(wrapped_model.generation_config, "pad_token_id", None)
+            if pad_id is None:
+                pad_id = 0
+
             return wrapped_model.language_model.generate(
                 inputs_embeds=audio_embeds,
-                pad_token_id=wrapped_model.config.pad_token_id,
-                eos_token_id=wrapped_model.config.eos_token_id,
+                pad_token_id=pad_id,
+                eos_token_id=eos_id,
                 **kwargs
             )
         else:
@@ -573,7 +632,14 @@ training_args = Seq2SeqTrainingArguments(
     gradient_accumulation_steps=GRAD_ACCUM,
     num_train_epochs=NUM_EPOCHS,
     learning_rate=LR,
-    warmup_ratio=WARMUP_RATIO,
+    warmup_steps=max(
+        1,
+        int(
+            math.ceil(len(train_dataset) / (PER_DEVICE_BATCH * GRAD_ACCUM))
+            * NUM_EPOCHS
+            * WARMUP_RATIO
+        ),
+    ),
     weight_decay=WEIGHT_DECAY,
     max_grad_norm=MAX_GRAD_NORM,
     fp16=fp16 and torch.cuda.is_available(),
