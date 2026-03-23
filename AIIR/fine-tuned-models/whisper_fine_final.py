@@ -27,22 +27,30 @@ DATASET_NAME = "abby1492/mathbridge-audio"
 AUDIO_COLUMN = "audio"
 SPLIT = "train"
 MAX_SAMPLES = None  
-OUTPUT_XLSX = "whisper_math_outputs2.xlsx"
-OUTPUT_MODEL_DIR = "./whisper_math_best"
+OUTPUT_XLSX = "whisper_full_outputs.xlsx"
+OUTPUT_MODEL_DIR = "./whisper_full_best"
 
-DATASET2_NAME = "OwenLeitezll/FormulaSearch"
+DATASET2_NAME = "OwenLeitzell/FormulaSearch"
 DATASET2_SPLIT = "train"
 DATASET2_AUDIO_COLUMN = "audio"
 DATASET2_MAX_SAMPLES = None
 
 # Load and combine datasets into a single Dataset
+# Use only columns needed for training so both datasets have the same schema (required for concatenate_datasets)
+REQUIRED_COLUMNS = [AUDIO_COLUMN, "equation"]
 print(f"Loading datasets: {DATASET_NAME} ({SPLIT}) and {DATASET2_NAME} ({DATASET2_SPLIT})")
 dataset1 = load_dataset(DATASET_NAME, split=SPLIT)
 dataset2 = load_dataset(DATASET2_NAME, split=DATASET2_SPLIT)
-dataset = concatenate_datasets([dataset1, dataset2])
 
-# Ensure correct audio sampling rate
-dataset = dataset.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
+# Keep only required columns in each so schemas match (avoids None/missing values after concat)
+def keep_required_columns(ds, required):
+    to_remove = [c for c in ds.column_names if c not in required]
+    return ds.remove_columns(to_remove) if to_remove else ds
+dataset1 = keep_required_columns(dataset1, REQUIRED_COLUMNS)
+dataset2 = keep_required_columns(dataset2, REQUIRED_COLUMNS)
+dataset1 = dataset1.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
+dataset2 = dataset2.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
+dataset = concatenate_datasets([dataset1, dataset2])
 
 # Split into train and validation (80/20 split)
 dataset = dataset.train_test_split(test_size=0.2, seed=41)
@@ -57,14 +65,13 @@ print(f"Validation samples: {len(eval_dataset)}")
 #Whisper uses audio features which use more memory than text, need a smaller batch size
 PER_DEVICE_BATCH = 16  #16 samples per batch per GPU (for 50-100GB VRAM on Turing)
 GRAD_ACCUM = 2 #effective batch size = 2 * 16 = 32, more GPUs = more effective batch size
-fp16 = True #use True to save memory if required, False for more accuracy
-NUM_EPOCHS = 20  # More epochs for better learning
+fp16 = True #use True to save memory if required, False for more accuracy 
+NUM_EPOCHS = 30  #More epochs for better learning
 LR = 1e-5  #also checked 2e-5 for full fine tuning
 WARMUP_RATIO = 0.1  #Warm up for 10% of training
 WEIGHT_DECAY = 0.005 #also checked 0.01 for full fine tuning
 MAX_GRAD_NORM = 1.0  
 
-#relativly unneccessary but good to have, will use GPU if available
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print("Using device:", device)
 
@@ -75,7 +82,7 @@ if MAX_SAMPLES:
 
 # Evaluation settings (computed after dataset is prepared)
 steps_per_epoch = max(1, len(train_dataset) // (PER_DEVICE_BATCH * GRAD_ACCUM))  # avoid zero
-EVAL_STEPS = max(100, steps_per_epoch // 4)  # 4 evaluations per epoch when possible
+EVAL_STEPS = max(100, steps_per_epoch // 2)  # 4 evaluations per epoch when possible
 SAVE_STEPS = EVAL_STEPS  # should match EVAL_STEPS
 EARLY_STOPPING_PATIENCE = 5  # increased from 3 for more tolerance to overfitting
 
@@ -274,7 +281,6 @@ processor.save_pretrained(OUTPUT_MODEL_DIR)#save the processor for future use
 print(f"\nBest model saved to {OUTPUT_MODEL_DIR}")#print the path so I can find it later
 
 # -------------------- FINAL EVALUATION -------------------- #
-#train and save 
 print("\n" + "="*50)
 print("Running final evaluation on validation set...")
 print("="*50 + "\n")
@@ -287,85 +293,107 @@ def detect_hallucination(pred: str, gt: str):
     halluc = [t for t in set(p_toks) if t not in g_toks]#any extra tokens (not in ground truth)
     return ",".join(halluc) if halluc else "none"
 
-def generate_prediction(model, input_feat):
-    model.eval() #DO THE EVALUATION!
-    with torch.no_grad(): #freeze from updating
-        ids = model.generate(
+def generate_prediction(m, input_feat):
+    m.eval()
+    with torch.no_grad():
+        ids = m.generate(
             input_features=torch.tensor(input_feat).unsqueeze(0).to(device),
             max_length=225,
-            num_beams=5,  # Use beam search for better results(5 beams or best paths through the tree)
-            #Takes five best predictions for better quality
+            num_beams=5, #use beam search to find the 5 best paths through the tree
         )
     return normalize_latex(tk.decode(ids[0], skip_special_tokens=True))
 
-# Load base model for comparison
-#uses the same config as the fine tuned model and dataset
-print("Loading base model for comparison...")
-base_model = WhisperForConditionalGeneration.from_pretrained(MODEL_NAME).to(device)
-base_model.config.forced_decoder_ids = processor.get_decoder_prompt_ids(language="en", task="transcribe")
-base_model.eval() #no training just evaluation
-# Load evaluation data with original fields
-eval_data_full = dataset["test"] #on the test set (200 samples)
+# Prepare evaluation data
+eval_data_full = dataset["test"]
 eval_data_full = eval_data_full.cast_column(AUDIO_COLUMN, Audio(sampling_rate=16000))
-#normalize the LaTeX
 eval_data_full = eval_data_full.map(lambda ex: {"text_norm": normalize_latex(ex.get("equation", ""))})
-
-# Prepare for prediction
 eval_data_processed = eval_data_full.map(
     lambda ex: {"input_features": processor(ex[AUDIO_COLUMN]["array"], sampling_rate=16000).input_features[0]}
 )
 
+# ---------- PASS 1: Fine-tuned model ----------
 model.to(device)
 model.eval()
-rows = []
-
-#Unfine tuned model
-print(f"Evaluating {len(eval_data_processed)} examples")
+ft_results = []
+print(f"[Fine-tuned] Evaluating {len(eval_data_processed)} examples")
 for i in range(len(eval_data_processed)):
     if i % 20 == 0:
-        print(f"Progress: {i}/{len(eval_data_processed)}")#Print the progress so I know it is working
-    #original vs preprocessed
+        print(f"  Progress: {i}/{len(eval_data_processed)}")
     ex_full = eval_data_full[i]
     ex_proc = eval_data_processed[i]
-    
-    gt = ex_full["text_norm"]#save the ground truth
+    gt = ex_full["text_norm"]
     input_feat = ex_proc["input_features"]
     audio_path = ex_full[AUDIO_COLUMN].get("path", "unknown")
 
-    # Base model prediction
-    pred_base = generate_prediction(base_model, input_feat)
-    wer_base = wer_metric.compute(predictions=[pred_base], references=[gt])
-    cer_base = cer_metric.compute(predictions=[pred_base], references=[gt])
-    hall_base = detect_hallucination(pred_base, gt)
-
-    # Fine-tuned model prediction
     pred_ft = generate_prediction(model, input_feat)
-    wer_ft = wer_metric.compute(predictions=[pred_ft], references=[gt])
-    cer_ft = cer_metric.compute(predictions=[pred_ft], references=[gt])
-    hall_ft = detect_hallucination(pred_ft, gt)
-    #save results to the output excel file
-    rows.append({
+    ft_results.append({
         "id": i,
         "audio_file": audio_path,
         "GT_LaTeX": gt,
-        "Base_Pred_LaTeX": pred_base,
         "FineTuned_Pred_LaTeX": pred_ft,
-        "Base_WER": wer_base,
-        "Base_CER": cer_base,
-        "Base_Hallucination": hall_base,
-        "FineTuned_WER": wer_ft,
-        "FineTuned_CER": cer_ft,
-        "FineTuned_Hallucination": hall_ft,
-        "WER_Improvement": wer_base - wer_ft,
-        "CER_Improvement": cer_base - cer_ft,
+        "FineTuned_WER": wer_metric.compute(predictions=[pred_ft], references=[gt]),
+        "FineTuned_CER": cer_metric.compute(predictions=[pred_ft], references=[gt]),
+        "FineTuned_Hallucination": detect_hallucination(pred_ft, gt),
     })
+print("[Fine-tuned] Done.")
 
-# Save detailed results
-df = pd.DataFrame(rows)
+# Free fine-tuned model from GPU before loading base
+model.cpu()
+del model
+del trainer
+torch.cuda.empty_cache()
+import gc; gc.collect()
+print("Fine-tuned model freed from GPU.\n")
+
+# ---------- PASS 2: Base model ----------
+print(f"Loading base model {MODEL_NAME} for comparison...")
+base_model = WhisperForConditionalGeneration.from_pretrained(MODEL_NAME).to(device)
+base_model.config.forced_decoder_ids = processor.get_decoder_prompt_ids(language="en", task="transcribe")
+base_model.eval()
+base_results = []
+print(f"[Base] Evaluating {len(eval_data_processed)} examples")
+for i in range(len(eval_data_processed)):
+    if i % 20 == 0:
+        print(f"  Progress: {i}/{len(eval_data_processed)}")
+    ex_full = eval_data_full[i]
+    ex_proc = eval_data_processed[i]
+    gt = ex_full["text_norm"]
+    input_feat = ex_proc["input_features"]
+
+    pred_base = generate_prediction(base_model, input_feat)
+    base_results.append({
+        "Base_Pred_LaTeX": pred_base,
+        "Base_WER": wer_metric.compute(predictions=[pred_base], references=[gt]),
+        "Base_CER": cer_metric.compute(predictions=[pred_base], references=[gt]),
+        "Base_Hallucination": detect_hallucination(pred_base, gt),
+    })
+print("[Base] Done.")
+
+# Free base model
+base_model.cpu()
+del base_model
+torch.cuda.empty_cache()
+gc.collect()
+
+# ---------- Merge results ----------
+rows = []
+for ft, base in zip(ft_results, base_results):
+    row = {**ft, **base}
+    row["WER_Improvement"] = row["Base_WER"] - row["FineTuned_WER"]
+    row["CER_Improvement"] = row["Base_CER"] - row["FineTuned_CER"]
+    rows.append(row)
+
+# Explicit column order so the Excel is easy to read
+col_order = [
+    "id", "audio_file", "GT_LaTeX",
+    "Base_Pred_LaTeX", "Base_WER", "Base_CER", "Base_Hallucination",
+    "FineTuned_Pred_LaTeX", "FineTuned_WER", "FineTuned_CER", "FineTuned_Hallucination",
+    "WER_Improvement", "CER_Improvement",
+]
+df = pd.DataFrame(rows)[col_order]
 df.to_excel(OUTPUT_XLSX, index=False)
 print(f"\nDetailed results saved to {OUTPUT_XLSX}")
 
-# Print summary statistics
 print("\n" + "="*50)
 print("FINAL RESULTS SUMMARY")
 print("="*50)
