@@ -10,6 +10,13 @@ There is a lot of carry over from the whisper_fine_final.py file.
 #-------------IMPORTS-------------------
 import os
 import re
+import gc
+
+# Redirect HuggingFace cache to /disk/scratch which has more space than ~
+os.environ["HF_HOME"] = "/disk/scratch/owen.leitzell/hf_cache"
+os.environ["HF_DATASETS_CACHE"] = "/disk/scratch/owen.leitzell/hf_cache/datasets"
+os.environ["TMPDIR"] = "/disk/scratch/owen.leitzell"
+
 import torch
 import pandas as pd
 from datasets import load_dataset
